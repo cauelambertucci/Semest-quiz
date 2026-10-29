@@ -1,0 +1,52 @@
+const {createRequire}=require('module');const fs=require('fs');const assert=require('assert/strict');
+const root=require('path').resolve(__dirname,'..')+'/';const req=createRequire(root+'package.json');const ts=req('typescript');const {Miniflare}=createRequire(req.resolve('wrangler/package.json'))('miniflare');
+const read=p=>fs.readFileSync(root+p,'utf8');
+let code="import {env} from 'cloudflare:workers'; function gameDb(){return env.DB;} let incoming; const headers=async()=>incoming; const redirect=()=>{throw Error('Unexpected redirect')};\n";
+code+=read('app/chatgpt-auth.ts').replace(/import .*?;\n/g,'')+'\n';
+code+=read('app/management.ts').replace(/import .*?;\n/g,'')+'\n';
+code+=read('db/default-quiz.ts')+'\n';
+code+=read('app/api/game/route.ts').replace(/import .*?;\n/g,'')+'\nexport default {async fetch(r){incoming=r.headers;return POST(r)}};';
+(async()=>{const mf=new Miniflare({modules:true,script:ts.transpileModule(code,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText,compatibilityDate:'2026-05-15',d1Databases:['DB'],bindings:{MANAGEMENT_PASSWORD:'test-password',MANAGEMENT_SESSION_SECRET:'test-secret-for-local-only'}});try{
+const db=await mf.getD1Database('DB');for(const file of fs.readdirSync(root+'drizzle').filter(x=>x.endsWith('.sql')).sort())for(const sql of read('drizzle/'+file).split('--> statement-breakpoint'))if(sql.trim())await db.prepare(sql).run();
+let managerCookie='';
+async function call(action,data={},identity='none'){
+ const h={'Content-Type':'application/json',Origin:'http://quiz.test'};
+ if(identity!=='none'){h['oai-authenticated-user-id']='test-'+identity;h['oai-authenticated-user-email']=identity==='manager'?'manager@example.test':'outsider@example.com';}
+ if(identity==='manager')h.Cookie=managerCookie;
+ const r=await mf.dispatchFetch('http://quiz.test/api/game',{method:'POST',headers:h,body:JSON.stringify({action,...data})});return {status:r.status,data:await r.json(),cookie:r.headers.get('set-cookie')};
+}
+for(const identity of ['none','outsider'])for(const action of ['create','save_draft','load_draft'])assert.equal((await call(action,{},identity)).status,403);
+assert.equal((await call('management_login',{password:'wrong'})).status,403);
+const login=await call('management_login',{password:'test-password'});assert.equal(login.status,200);assert(login.cookie.includes('HttpOnly'));managerCookie=login.cookie.split(';')[0];
+assert.equal((await call('management')).data.canManage,false);assert.equal((await call('management',{},'manager')).data.canManage,true);
+const draft=(await call('load_draft',{},'manager')).data;assert.equal(draft.revision,0);
+const content={title:'Quiz preparado antes do evento',questions:[{text:'Pergunta persistente',options:['A','B','C','D'],correct:2,seconds:20}],revision:0};
+const save=await call('save_draft',content,'manager');assert.equal(save.status,200);assert.equal(save.data.revision,1);
+assert.equal((await call('save_draft',content,'manager')).status,409);
+const reopened=(await call('load_draft',{},'manager')).data;assert.equal(reopened.title,content.title);assert.deepEqual(reopened.questions,content.questions);
+assert.equal((await call('create',{revision:0},'manager')).status,409);
+const room=(await call('create',{revision:1,questions:[],title:'tampered'},'manager')).data;assert(room.hostToken);
+assert.equal((await call('join',{pin:room.pin,name:'Inválido',avatar:12})).status,400);
+const player=(await call('join',{pin:room.pin,name:'Participante',avatar:8})).data;assert(player.playerToken);
+const before=(await call('state',player)).data;assert.equal(before.myAvatar,8);assert.equal(before.players.find(p=>p.id===player.playerId).avatar,8);
+assert.equal((await call('update_avatar',{...player,avatar:11,playerToken:'wrong'})).status,403);
+assert.equal((await call('update_avatar',{...player,avatar:-1})).status,400);
+assert.equal((await call('update_avatar',{...player,avatar:11})).status,200);
+assert.equal((await call('state',player)).data.myAvatar,11);
+assert.equal((await call('state',room,'manager')).data.players.find(p=>p.id===player.playerId).avatar,11);
+const legacy=(await call('join',{pin:room.pin,name:'Sem personalização'})).data;
+assert.equal((await call('state',legacy)).data.myAvatar,0);
+assert.equal((await call('advance',{...room,current:-1})).status,403);
+assert.equal((await call('advance',{...room,current:-1},'manager')).status,200);
+assert.equal((await call('update_avatar',{...player,avatar:1})).status,403);
+const q=(await call('state',player)).data;assert.equal(q.question.text,'Pergunta persistente');assert.equal(q.question.correct,undefined);
+assert.equal((await call('answer',{...player,current:0,choice:2})).status,200);
+assert.equal((await call('answer',{...player,current:0,choice:1})).status,409);
+const changed={...content,revision:1,title:'Outra preparação',questions:[{...content.questions[0],text:'Pergunta nova'}]};assert.equal((await call('save_draft',changed,'manager')).status,200);
+assert.equal((await call('state',player)).data.question.text,'Pergunta persistente');
+const incomplete={title:'Rascunho',questions:[],revision:2};assert.equal((await call('save_draft',incomplete,'manager')).status,200);assert.equal((await call('create',{revision:3},'manager')).status,400);
+assert.equal((await db.prepare("SELECT revision FROM quiz_drafts WHERE id='semest'").first()).revision,3);
+await db.prepare("UPDATE rooms SET status='finished' WHERE pin=?").bind(room.pin).run();assert.equal((await call('state',player)).data.players.find(p=>p.id===player.playerId).avatar,11);
+const validCookie=managerCookie;managerCookie+='tampered';assert.equal((await call('load_draft',{},'manager')).status,403);managerCookie=validCookie;assert((await call('management_logout',{},'manager')).cookie.includes('Max-Age=0'));
+console.log('PASS: anonymous/unauthorized blocked; authorized management; durable save/read; revision conflicts; immutable room questions; incomplete drafts; public join/answer; duplicate prevention; avatar ownership, validation, persistence, lobby updates and final ranking.');
+}finally{await mf.dispose()}})().catch(e=>{console.error(e);process.exitCode=1});

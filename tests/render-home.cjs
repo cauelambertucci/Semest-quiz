@@ -1,0 +1,10 @@
+const {createRequire}=require('node:module');
+const path=require('node:path');const fs=require('node:fs');const assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'..');const requireProject=createRequire(path.join(root,'package.json'));
+const esbuild=createRequire(requireProject.resolve('wrangler/package.json'))('esbuild');
+const React=requireProject('react');const {renderToString}=requireProject('react-dom/server');
+const dir=path.join(root,'.sites-runtime');fs.mkdirSync(dir,{recursive:true});const outfile=path.join(dir,'test-home.cjs');
+esbuild.buildSync({entryPoints:[path.join(root,'app/page.tsx')],outfile,bundle:true,platform:'node',format:'cjs',jsx:'automatic',packages:'external',tsconfig:path.join(root,'tsconfig.json'),logLevel:'silent'});
+const Home=require(outfile).default;const html=renderToString(React.createElement(Home));
+assert(html.includes('Entre no jogo'));assert(html.includes('Desbloquear gestão'));
+console.log('PASS: initial server render without game or pending answer');

@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1789331884452,
+      "tag": "0000_green_domino",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789667162568,
+      "tag": "0001_parallel_lilith",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789690601630,
+      "tag": "0002_round_patch",
+      "breakpoints": true
+    }
+  ]
+}
